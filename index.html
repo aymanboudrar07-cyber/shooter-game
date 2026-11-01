@@ -4116,6 +4116,20 @@ function drawBotBar(b){
 function makePickups(){
   pickups = [];
   const PM = Math.min(30, HALF * 0.2);   // placement margin: 30 m on the big map, 10 m in the 100×100 wolf arena
+  /* shared spawner: build the model, drop it at (x, z) and register it */
+  const addPickup = (type, x, z)=>{
+    /* gear drops at a random level: 1 is common, 2 rarer, 3 rare */
+    let pLvl = 0;
+    if(type === 'vest' || type === 'helm'){ const lr = Math.random(); pLvl = lr < 0.5 ? 1 : lr < 0.83 ? 2 : 3; }
+    const grp = pickupMesh(type, pLvl);
+    grp.position.set(x, 1.1, z);
+    const isW = !!WEAPONS[type];
+    if(isW) grp.rotation.y = rand(0, Math.PI * 2);   // a gun lying on the ground keeps a random heading (it does not spin)
+    pickupGroup.add(grp);
+    pickups.push({ x, z, type, lvl:pLvl, r:2.2, bob: rand(0,6), grp, baseY:1.1, isWeapon: isW });
+  };
+  /* ===== consumables: medkits, ammo, coins, grenades and wearable
+     gear (vest/helmet) — scattered at random, exactly as before ===== */
   const defs = [];
   for(let i=0;i<12;i++) defs.push('medkit');
   for(let i=0;i<12;i++) defs.push('ammo');
@@ -4123,20 +4137,6 @@ function makePickups(){
   for(let i=0;i<10;i++) defs.push('grenade');
   for(let i=0;i<6;i++) defs.push('vest');
   for(let i=0;i<6;i++) defs.push('helm');
-  /* ===== the SIX ORIGINAL weapons lie on the ground as loot =====
-     Only the originals (ORIG6) are ever scattered: several copies of
-     each across the big battle-royale map, one of each in the small
-     100×100 wolf arena. The 20 shop weapons are NEVER placed here —
-     they are bought with coins in the shop (B) and nowhere else. */
-  const wepLoot = HALF > 100
-    ? ['pistol','pistol','pistol',
-       'ar','ar','ar','ar','ar','ar',
-       'shotgun','shotgun','shotgun','shotgun','shotgun',
-       'lmg','lmg','lmg','lmg',
-       'sniper','sniper','sniper',
-       'deagle','deagle','deagle','deagle']
-    : ORIG6.slice();
-  for(const wk of wepLoot) defs.push(wk);
   for(const type of defs){
     let p = null;
     for(let t=0;t<50 && !p;t++){
@@ -4145,15 +4145,63 @@ function makePickups(){
       p = c;
     }
     if(!p) continue;
-    /* gear drops at a random level: 1 is common, 2 rarer, 3 rare */
-    let pLvl = 0;
-    if(type === 'vest' || type === 'helm'){ const lr = Math.random(); pLvl = lr < 0.5 ? 1 : lr < 0.83 ? 2 : 3; }
-    const grp = pickupMesh(type, pLvl);
-    grp.position.set(p.x, 1.1, p.z);
-    const isW = !!WEAPONS[type];
-    if(isW) grp.rotation.y = rand(0, Math.PI * 2);   // a gun lying on the ground keeps a random heading (it does not spin)
-    pickupGroup.add(grp);
-    pickups.push({ x:p.x, z:p.z, type, lvl:pLvl, r:2.2, bob: rand(0,6), grp, baseY:1.1, isWeapon: isW });
+    addPickup(type, p.x, p.z);
+  }
+  /* ===== the SIX ORIGINAL weapons lie on the ground as loot =====
+     Only the originals (ORIG6) are ever scattered — the 20 shop
+     weapons are NEVER placed here; they are bought with coins in
+     the shop (B) and nowhere else. The originals now cover the
+     WHOLE map on an even grid, roughly one weapon every 100–150 m:
+       · battle royale (1000×1000): 90 weapons — 15 of each of the
+         six — on a 10×9 grid of ~100 m cells;
+       · lone wolf (100×100 arena): 18 weapons — 3 of each — on a
+         6×3 grid spread over the whole arena.
+     Types are shuffled so the six kinds are mixed evenly, and each
+     grid cell gets a jittered spot (retried around obstacles); if a
+     cell is fully built over, the weapon falls back to a free spot
+     anywhere on the map so the total count still holds. Placement
+     runs on rand()/Math.random like everything else, so under the
+     shared match seed both duo devices lay the identical grid. */
+  const isBR = HALF > 100;
+  const cols = isBR ? 10 : 6, rows = isBR ? 9 : 3;
+  const perType = isBR ? 15 : 3;
+  const wepTypes = [];
+  for(let r = 0; r < perType; r++) for(const wk of ORIG6) wepTypes.push(wk);
+  for(let i = wepTypes.length - 1; i > 0; i--){   // Fisher–Yates shuffle: the six kinds end up mixed across the cells
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = wepTypes[i]; wepTypes[i] = wepTypes[j]; wepTypes[j] = tmp;
+  }
+  const lo = -HALF + PM, span = (HALF - PM) * 2;
+  const cellW = span / cols, cellH = span / rows;
+  const minSep = isBR ? 12 : 4;   // closest two ground weapons may sit
+  const placedW = [];
+  const tooClose = (x, z)=>{
+    for(const q of placedW){ const dx = q.x - x, dz = q.z - z; if(dx*dx + dz*dz < minSep * minSep) return true; }
+    return false;
+  };
+  for(let n = 0; n < wepTypes.length; n++){
+    const cx = lo + (n % cols + 0.5) * cellW;
+    const cz = lo + (Math.floor(n / cols) + 0.5) * cellH;
+    let p = null;
+    for(let t = 0; t < 28 && !p; t++){   // jitter inside this cell
+      const c = { x: cx + rand(-0.38, 0.38) * cellW, z: cz + rand(-0.38, 0.38) * cellH };
+      if(pointBlocked(c.x, c.z, 1.5) || tooClose(c.x, c.z)) continue;
+      p = c;
+    }
+    for(let t = 0; t < 60 && !p; t++){   // cell built over: fall back to any free spot on the map
+      const c = { x: rand(lo, lo + span), z: rand(lo, lo + span) };
+      if(pointBlocked(c.x, c.z, 1.5) || tooClose(c.x, c.z)) continue;
+      p = c;
+    }
+    for(let t = 0; t < 30 && !p; t++){   // last resort: relax the separation, keep the count
+      const c = { x: rand(lo, lo + span), z: rand(lo, lo + span) };
+      if(pointBlocked(c.x, c.z, 1.5)) continue;
+      p = c;
+    }
+    if(!p && !pointBlocked(cx, cz, 1.5)) p = { x: cx, z: cz };
+    if(!p) continue;
+    placedW.push(p);
+    addPickup(wepTypes[n], p.x, p.z);
   }
   /* ===== ground loot: the six ORIGINAL weapons (above) plus the
      consumables — medkits, ammo, coins, grenades and wearable gear
